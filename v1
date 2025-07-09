@@ -1,0 +1,254 @@
+import tkinter as tk
+from tkinter import ttk
+import threading
+import time
+import random
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+
+class EncoderSimulatorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Encoder Simulator")
+        self.root.geometry("1000x900")
+        self.running = False
+
+        self.sample_interval_var = tk.DoubleVar(value=0.05)
+        self.session_duration_var = tk.IntVar(value=0)
+        self.ppr_var = tk.IntVar(value=200)
+        self.enable_backlash_var = tk.BooleanVar(value=True)
+        self.enable_correction_var = tk.BooleanVar(value=True)
+        self.correction_count = 0
+
+        ttk.Label(root, text="Sampling Interval (s):").grid(row=0, column=0)
+        ttk.Entry(root, textvariable=self.sample_interval_var).grid(row=0, column=1)
+
+        ttk.Label(root, text="Session Duration (s):").grid(row=1, column=0)
+        ttk.Entry(root, textvariable=self.session_duration_var).grid(row=1, column=1)
+
+        ttk.Label(root, text="Pulses per Revolution:").grid(row=2, column=0)
+        ttk.Entry(root, textvariable=self.ppr_var).grid(row=2, column=1)
+
+        ttk.Checkbutton(root, text="Enable Backlash Simulation", variable=self.enable_backlash_var).grid(row=3, column=0, columnspan=2, sticky="w", padx=5)
+        ttk.Checkbutton(root, text="Enable Error Correction", variable=self.enable_correction_var).grid(row=4, column=0, columnspan=2, sticky="w", padx=5)
+
+        self.start_btn = ttk.Button(root, text="Start", command=self.start_simulation)
+        self.start_btn.grid(row=5, column=0, pady=10)
+
+        self.stop_btn = ttk.Button(root, text="Stop", command=self.stop_simulation, state="disabled")
+        self.stop_btn.grid(row=5, column=1)
+
+        self.status_var = tk.StringVar(value="Ready.")
+        self.status_label = ttk.Label(root, textvariable=self.status_var, font=("Arial", 12), foreground="blue")
+        self.status_label.grid(row=6, column=0, columnspan=2, pady=5)
+
+        self.target_var = tk.StringVar()
+        self.actual_var = tk.StringVar()
+        self.error_var = tk.StringVar()
+        self.total_distance_var = tk.StringVar()
+        self.direction_var = tk.StringVar()
+        self.correction_var = tk.StringVar()
+        self.correction_count_var = tk.StringVar()
+
+        self.create_info_labels()
+
+        self.fig, self.ax1 = plt.subplots(figsize=(12, 6))
+        self.ax2 = self.ax1.twinx()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=root)
+        self.canvas.get_tk_widget().grid(row=7, column=0, columnspan=2, pady=10, sticky="nsew")
+
+        self.root.rowconfigure(7, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(1, weight=1)
+
+        # Spreadsheet (Treeview)
+        self.table_frame = ttk.Frame(root)
+        self.table_frame.grid(row=13, column=0, columnspan=2, sticky="nsew", padx=10, pady=5)
+
+        self.table = ttk.Treeview(self.table_frame, columns=("time", "pos", "vel", "err", "corr"), show="headings")
+        self.table.heading("time", text="Time (s)")
+        self.table.heading("pos", text="Position (mm)")
+        self.table.heading("vel", text="Velocity (mm/s)")
+        self.table.heading("err", text="Error (mm)")
+        self.table.heading("corr", text="Correction?")
+
+        self.table.column("time", width=100, anchor="center")
+        self.table.column("pos", width=100, anchor="center")
+        self.table.column("vel", width=120, anchor="center")
+        self.table.column("err", width=100, anchor="center")
+        self.table.column("corr", width=100, anchor="center")
+
+        scrollbar = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+    def create_info_labels(self):
+        ttk.Label(self.root, textvariable=self.target_var, font=("Arial", 10)).grid(row=8, column=0, sticky="w", padx=10)
+        ttk.Label(self.root, textvariable=self.actual_var, font=("Arial", 10)).grid(row=8, column=1, sticky="e", padx=10)
+        ttk.Label(self.root, textvariable=self.error_var, font=("Arial", 10)).grid(row=9, column=0, sticky="w", padx=10)
+        ttk.Label(self.root, textvariable=self.total_distance_var, font=("Arial", 10)).grid(row=9, column=1, sticky="e", padx=10)
+        ttk.Label(self.root, textvariable=self.direction_var, font=("Arial", 10)).grid(row=10, column=0, columnspan=2, pady=(5, 0))
+        ttk.Label(self.root, textvariable=self.correction_var, font=("Arial", 10), foreground="green").grid(row=11, column=0, columnspan=2)
+        ttk.Label(self.root, textvariable=self.correction_count_var, font=("Arial", 10)).grid(row=12, column=0, columnspan=2, pady=(0, 10))
+
+        self.target_var.set("\U0001F3AF Target: 0.00 mm")
+        self.actual_var.set("\U0001F4CD Actual: 0.00 mm")
+        self.error_var.set("\U0001F4CF Error: 0.00 mm")
+        self.total_distance_var.set("\U0001F4C8 Cumulative Travel: 0.00 mm")
+        self.direction_var.set("\U0001F501 Direction: Idle")
+        self.correction_var.set("")
+        self.correction_count_var.set("\U0001F522 Corrections Applied: 0")
+
+    def start_simulation(self):
+        if not self.running:
+            self.running = True
+            self.start_btn.config(state="disabled")
+            self.stop_btn.config(state="normal")
+            self.status_var.set("Simulation running...")
+            threading.Thread(target=self.run_simulation, daemon=True).start()
+
+    def stop_simulation(self):
+        self.running = False
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.status_var.set("\U0001F6D1 Simulation stopped.")
+        self.correction_count = 0
+        self.correction_count_var.set("\U0001F522 Corrections Applied: 0")
+        self.correction_var.set("")
+
+    def run_simulation(self):
+        sample_interval = self.sample_interval_var.get()
+        session_duration = self.session_duration_var.get()
+        ppr = self.ppr_var.get()
+
+        mm_per_rev = 12.7
+        mm_per_pulse = mm_per_rev / ppr
+
+        targets_mm = [0, 6.35, 12.7, 6.35, 0, -6.35, -12.7, -6.35, 0]
+        target_index = 0
+
+        current_pos_mm = 0
+        cumulative_distance = 0
+
+        timestamps, positions, velocities = [], [], []
+        move_markers = []
+        correction_markers = []
+
+        start_time = time.time()
+        last_time = start_time
+        last_pos_mm = 0
+
+        while self.running:
+            now = time.time()
+            elapsed = now - start_time
+            dt = now - last_time
+
+            target_mm = targets_mm[target_index]
+
+            if current_pos_mm < target_mm:
+                direction = 1
+            elif current_pos_mm > target_mm:
+                direction = -1
+            else:
+                self.status_var.set(f"\u2705 Reached {target_mm:.2f} mm — pausing 2 seconds...")
+                move_markers.append((now - start_time, current_pos_mm))
+                self.canvas.draw()
+                time.sleep(2)
+                target_index = (target_index + 1) % len(targets_mm)
+                continue
+
+            delta_mm = random.uniform(1.0, 2.0) * direction
+            if self.enable_backlash_var.get():
+                backlash_error = random.uniform(0.01, 0.20) * (-1 if direction > 0 else 1)
+                delta_mm += backlash_error
+
+            current_pos_mm += delta_mm
+
+            if (direction == 1 and current_pos_mm > target_mm) or (direction == -1 and current_pos_mm < target_mm):
+                delta_mm -= abs(current_pos_mm - target_mm)
+                current_pos_mm = target_mm
+
+            correction_flag = "No"
+            if self.enable_correction_var.get() and abs(current_pos_mm - target_mm) <= 0.25:
+                correction_applied = target_mm - current_pos_mm
+                if abs(correction_applied) > 1e-6:
+                    self.correction_count += 1
+                    self.status_var.set("\U0001F6E0 Applying backlash correction...")
+                    self.correction_var.set(f"\u2705 Correction applied: {correction_applied:+.3f} mm")
+                    self.correction_count_var.set(f"\U0001F522 Corrections Applied: {self.correction_count}")
+                    correction_markers.append((now - start_time, target_mm))
+                    correction_flag = "Yes"
+                current_pos_mm = target_mm
+            else:
+                self.correction_var.set("")
+
+            velocity = (current_pos_mm - last_pos_mm) / dt if dt > 0 else 0
+            cumulative_distance += abs(delta_mm)
+
+            timestamps.append(now - start_time)
+            positions.append(current_pos_mm)
+            velocities.append(velocity)
+
+            self.target_var.set(f"\U0001F3AF Target: {target_mm:.2f} mm")
+            self.actual_var.set(f"\U0001F4CD Actual: {current_pos_mm:.2f} mm")
+            self.error_var.set(f"\U0001F4CF Error: {abs(target_mm - current_pos_mm):.2f} mm")
+            self.total_distance_var.set(f"\U0001F4C8 Cumulative Travel: {cumulative_distance:.2f} mm")
+            self.direction_var.set(f"\U0001F501 Direction: {'Forward' if direction == 1 else 'Reverse'}")
+
+            self.table.insert("", "end", values=(
+                f"{now - start_time:.2f}",
+                f"{current_pos_mm:.2f}",
+                f"{velocity:.2f}",
+                f"{abs(target_mm - current_pos_mm):.3f}",
+                correction_flag
+            ))
+
+            last_time = now
+            last_pos_mm = current_pos_mm
+
+            self.ax1.clear()
+            self.ax2.clear()
+
+            self.ax1.plot(timestamps, positions, 'b-', label="Position (mm)")
+            self.ax2.plot(timestamps, velocities, 'r-', label="Velocity (mm/s)")
+
+            if move_markers:
+                mx, my = zip(*move_markers)
+                self.ax1.plot(mx, my, 'bo', label="Target Reached")
+            if correction_markers:
+                cx, cy = zip(*correction_markers)
+                self.ax1.plot(cx, cy, 'ro', label="Correction Applied")
+
+            self.ax1.set_xlabel("Time (s)")
+            self.ax1.set_ylabel("Position (mm)", color='blue')
+            self.ax2.set_ylabel("Velocity (mm/s)", color='red', labelpad=25)
+
+            self.ax1.yaxis.set_major_locator(MultipleLocator(1))
+            self.ax1.yaxis.set_minor_locator(MultipleLocator(0.5))
+            self.ax1.tick_params(axis='y', which='both', direction='in', right=True)
+            self.ax1.grid(True, which='both', linestyle='--', alpha=0.6)
+
+            handles, labels = self.ax1.get_legend_handles_labels()
+            by_label = dict(zip(labels, handles))
+            self.ax1.legend(by_label.values(), by_label.keys(), loc="upper left")
+            self.ax2.legend(loc="upper right")
+
+            self.canvas.draw()
+            self.fig.tight_layout()
+
+            if session_duration > 0 and elapsed >= session_duration:
+                start_time = time.time()
+                timestamps.clear()
+                positions.clear()
+                velocities.clear()
+                last_time = start_time
+                last_pos_mm = current_pos_mm
+
+            time.sleep(sample_interval)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = EncoderSimulatorApp(root)
+    root.mainloop()
